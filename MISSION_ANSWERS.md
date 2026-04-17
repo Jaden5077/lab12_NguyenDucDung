@@ -96,6 +96,14 @@ curl http://localhost:8000/ask -X POST \
 
 #### 4.3
 
+#### 4.3: Rate Limiting Analysis
+
+- **Algorithm được dùng:** **Sliding Window Log** (trong file đính kèm mô tả là Sliding Window Counter). Logic sử dụng một `deque` để lưu trữ timestamp của các request trong quá khứ và loại bỏ các timestamp nằm ngoài khoảng thời gian (window) hiện tại.
+- **Limit:**
+  - **User:** 10 requests / minute (60 seconds).
+  - **Admin:** 100 requests / minute (60 seconds).
+- **Cách bypass/nâng limit cho admin:** Hệ thống không thực sự "bypass" hoàn toàn mà thực hiện phân tầng (tiering). Trong file `app.py`, endpoint `/ask` sẽ kiểm tra role của user: nếu `role == "admin"`, nó sẽ gán instance `rate_limiter_admin` thay vì `rate_limiter_user`, từ đó cấp cho admin hạn mức cao hơn gấp 10 lần.
+
 ```bash
 $ for i in {1..20}; do
   curl http://localhost:8000/ask -X POST \
@@ -132,12 +140,14 @@ done
 Để giải quyết bài toán quản lý ngân sách (Cost Guard) một cách bền vững trong môi trường production, chúng ta chuyển từ lưu trữ in-memory sang sử dụng **Redis**.
 
 **Lợi ích của Redis:**
+
 - **Persistence:** Budget không bị mất khi hop/container bị restart.
 - **Shared State:** Nếu chạy nhiều instance của Agent (scaling), tất cả đều check chung một nguồn dữ liệu budget.
 - **Performance:** Thao tác đọc/ghi cực nhanh, không làm chậm API.
 - **TTL (Time To Live):** Tự động reset dữ liệu cũ (ví dụ sau 32 ngày).
 
 **Mô tả logic:**
+
 1. Tạo một `month_key` dựa trên tháng hiện tại (ví dụ: `2024-04`).
 2. Sử dụng key định dạng `budget:{user_id}:{month_key}` để theo dõi chi tiêu của từng user theo từng tháng.
 3. Trước mỗi request, lấy chi tiêu hiện tại từ Redis.
@@ -174,7 +184,7 @@ def check_budget(user_id: str, estimated_cost: float) -> bool:
 
     # 5. Đặt TTL là 32 ngày (đảm bảo tồn tại qua hết tháng hiện tại)
     r.expire(redis_key, 32 * 24 * 3600)
-    
+
     return True
 ```
 
