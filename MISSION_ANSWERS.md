@@ -288,8 +288,7 @@ curl: (56) Recv failure: Connection was reset
 
 ### Exercise 5.3: Stateless design
 
-[Your explanations and test results]
-
+Modified: `05-scaling-reliability/production/app.py`
 ```
 
 ---
