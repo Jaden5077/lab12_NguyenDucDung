@@ -288,8 +288,150 @@ curl: (56) Recv failure: Connection was reset
 
 ### Exercise 5.3: Stateless design
 
-Modified: `05-scaling-reliability/production/app.py`
+**File đã refactor:** `05-scaling-reliability/production/app.py`
+
+**Anti-pattern đã loại bỏ:**
+
+```python
+# ❌ State trong memory — KHÔNG dùng
+conversation_history = {}
+
+@app.post("/ask")
+def ask(user_id: str, question: str):
+    history = conversation_history.get(user_id, [])  # Mỗi instance có dict riêng → bug khi scale!
 ```
+
+**Correct pattern đã implement:**
+
+```python
+# ✅ State trong Redis — stateless-compatible
+def append_message(session_id: str, role: str, content: str) -> None:
+    key = f"history:{session_id}"
+    message = json.dumps({"role": role, "content": content, "timestamp": ...})
+    r.rpush(key, message)       # append vào Redis list
+    r.ltrim(key, -MAX_HISTORY, -1)  # giữ tối đa MAX_HISTORY messages
+    r.expire(key, SESSION_TTL)  # tự dọn sau 1 giờ
+
+@app.post("/chat")
+async def chat(body: ChatRequest):
+    session_id = body.session_id or str(uuid.uuid4())
+    append_message(session_id, "user", body.question)   # ✅ ghi vào Redis
+    history = get_history(session_id)                   # ✅ đọc từ Redis
+    answer = ask(body.question)
+    append_message(session_id, "assistant", answer)
+    return {"session_id": session_id, "answer": answer, "served_by": INSTANCE_ID, "storage": "redis"}
+```
+
+**Tại sao stateless quan trọng khi scale:**
+
+- Instance 1 xử lý request 1 → lưu session trong **Redis** (không phải RAM)
+- Instance 2 xử lý request 2 → đọc session từ **Redis** → conversation vẫn liên tục
+- Nếu dùng `dict` trong memory → mỗi instance có data riêng → request 2 mất context
+
+```bash
+$ curl http://localhost:8080/health
+{"status":"ok","instance_id":"instance-69e1f3","uptime_seconds":45.2,"storage":"redis","redis_connected":true}
+```
+
+### Exercise 5.4: Load balancing
+
+**Stack khởi động với 3 agent instances + Redis + Nginx:**
+
+```bash
+$ docker compose up --scale agent=3 -d
+[+] up 6/6
+ ✔ Network production_agent_net  Created     0.0s
+ ✔ Container production-redis-1  Healthy    11.0s
+ ✔ Container production-agent-3  Started    11.5s
+ ✔ Container production-agent-1  Started    11.1s
+ ✔ Container production-agent-2  Started    11.2s
+ ✔ Container production-nginx-1  Started    11.6s
+```
+
+**Gửi 10 requests qua Nginx — quan sát load distribution:**
+
+```bash
+$ # Gọi 10 requests qua Nginx (port 8080)
+=== Exercise 5.4: Load Balancing Test ===
+Sending 10 requests through Nginx...
+
+Request  1: served by [instance-69e1f3] | answer: Đây là câu trả lời từ AI agent (mock). Trong produ...
+Request  2: served by [instance-4e2ed8] | answer: Tôi là AI agent được deploy lên cloud. Câu hỏi của...
+Request  3: served by [instance-360a12] | answer: Agent đang hoạt động tốt! (mock response) Hỏi thêm...
+Request  4: served by [instance-69e1f3] | answer: Đây là câu trả lời từ AI agent (mock). Trong produ...
+Request  5: served by [instance-4e2ed8] | answer: Đây là câu trả lời từ AI agent (mock). Trong produ...
+Request  6: served by [instance-360a12] | answer: Tôi là AI agent được deploy lên cloud. Câu hỏi của...
+Request  7: served by [instance-69e1f3] | answer: Agent đang hoạt động tốt! (mock response) Hỏi thêm...
+Request  8: served by [instance-4e2ed8] | answer: Đây là câu trả lời từ AI agent (mock). Trong produ...
+Request  9: served by [instance-360a12] | answer: Tôi là AI agent được deploy lên cloud. Câu hỏi của...
+Request 10: served by [instance-69e1f3] | answer: Đây là câu trả lời từ AI agent (mock). Trong produ...
+
+--- Load Distribution ---
+  instance-360a12: 3 requests
+  instance-4e2ed8: 3 requests
+  instance-69e1f3: 4 requests
+
+Total unique instances: 3
+LOAD BALANCING IS WORKING - requests distributed across multiple instances!
+```
+
+**Quan sát:**
+- Nginx dùng round-robin phân tán requests qua 3 instances
+- Mỗi instance phục vụ ~3-4 requests trên tổng 10
+- `served_by` field trong response cho thấy instance nào đang xử lý
+
+### Exercise 5.5: Test stateless
+
+```bash
+$ python test_stateless.py
+============================================================
+Stateless Scaling Demo
+============================================================
+
+Session ID: c10ef812-80cf-4c90-a3d3-e5f4a6f5a5a1
+
+Request 1: [instance-4e2ed8]
+  Q: What is Docker?
+  A: Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!...
+
+Request 2: [instance-360a12]
+  Q: Why do we need containers?
+  A: Đây là câu trả lời từ AI agent (mock)...
+
+Request 3: [instance-69e1f3]
+  Q: What is Kubernetes?
+  A: Agent đang hoạt động tốt! (mock response)...
+
+Request 4: [instance-4e2ed8]
+  Q: How does load balancing work?
+  A: Tôi là AI agent được deploy lên cloud...
+
+Request 5: [instance-360a12]
+  Q: What is Redis used for?
+  A: Đây là câu trả lời từ AI agent (mock)...
+
+------------------------------------------------------------
+Total requests: 5
+Instances used: ['instance-360a12', 'instance-4e2ed8', 'instance-69e1f3']
+✅ All requests served despite different instances!
+
+--- Conversation History ---
+Total messages: 10
+  [user]: What is Docker?...
+  [assistant]: Container là cách đóng gói app...
+  [user]: Why do we need containers?...
+  [assistant]: Đây là câu trả lời từ AI agent...
+  [user]: What is Kubernetes?...
+  [assistant]: Agent đang hoạt động tốt!...
+  [user]: How does load balancing work?...
+  [assistant]: Tôi là AI agent được deploy...
+  [user]: What is Redis used for?...
+  [assistant]: Đây là câu trả lời từ AI agent...
+
+✅ Session history preserved across all instances via Redis!
+```
+
+**Kết quả:** 5 requests được phân tán qua 3 instances khác nhau, nhưng session history vẫn hoàn chỉnh với 10 messages (5 user + 5 assistant) — chứng minh stateless design hoạt động đúng khi scale.
 
 ---
 
