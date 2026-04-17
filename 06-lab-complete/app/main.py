@@ -1,5 +1,5 @@
 """
-Production AI Agent — Kết hợp tất cả Day 12 concepts
+Production AI Agent — Kết hợp tất cả Day 12 concepts + Gemini API
 
 Checklist:
   ✅ Config từ environment (12-factor)
@@ -13,6 +13,7 @@ Checklist:
   ✅ Security headers
   ✅ CORS
   ✅ Error handling
+  ✅ Gemini API integration (real Q&A)
 """
 import os
 import time
@@ -20,19 +21,83 @@ import signal
 import logging
 import json
 from datetime import datetime, timezone
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Security, Depends, Request, Response
-from fastapi.security.api_key import APIKeyHeader
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
 from app.config import settings
+from app.auth import verify_api_key
+from app.rate_limiter import check_rate_limit
+from app.cost_guard import check_and_record_cost, get_daily_cost, get_daily_budget
 
-# Mock LLM (thay bằng OpenAI/Anthropic khi có API key)
-from utils.mock_llm import ask as llm_ask
+# ─────────────────────────────────────────────────────────
+# Gemini API Client
+# ─────────────────────────────────────────────────────────
+try:
+    from google import genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+gemini_client = None
+
+
+def init_gemini():
+    """Khởi tạo Gemini client."""
+    global gemini_client
+    if not GEMINI_AVAILABLE:
+        return False
+    if not settings.gemini_api_key:
+        return False
+
+    try:
+        gemini_client = genai.Client(api_key=settings.gemini_api_key)
+        return True
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Failed to init Gemini: {e}")
+        return False
+
+
+def ask_gemini(question: str) -> str:
+    """
+    Gọi Gemini API để trả lời câu hỏi.
+
+    Args:
+        question: Câu hỏi từ user.
+
+    Returns:
+        str: Câu trả lời từ Gemini.
+
+    Raises:
+        HTTPException: Nếu Gemini không available hoặc gọi bị lỗi.
+    """
+    if gemini_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini AI is not configured. Set GEMINI_API_KEY in .env"
+        )
+
+    try:
+        response = gemini_client.models.generate_content(
+            model=settings.llm_model,
+            contents=question,
+        )
+        return response.text.strip()
+    except Exception as e:
+        logger.error(json.dumps({
+            "event": "gemini_error",
+            "error": str(e),
+            "model": settings.llm_model,
+        }))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gemini API error: {str(e)}"
+        )
+
 
 # ─────────────────────────────────────────────────────────
 # Logging — JSON structured
@@ -49,54 +114,6 @@ _request_count = 0
 _error_count = 0
 
 # ─────────────────────────────────────────────────────────
-# Simple In-memory Rate Limiter
-# ─────────────────────────────────────────────────────────
-_rate_windows: dict[str, deque] = defaultdict(deque)
-
-def check_rate_limit(key: str):
-    now = time.time()
-    window = _rate_windows[key]
-    while window and window[0] < now - 60:
-        window.popleft()
-    if len(window) >= settings.rate_limit_per_minute:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded: {settings.rate_limit_per_minute} req/min",
-            headers={"Retry-After": "60"},
-        )
-    window.append(now)
-
-# ─────────────────────────────────────────────────────────
-# Simple Cost Guard
-# ─────────────────────────────────────────────────────────
-_daily_cost = 0.0
-_cost_reset_day = time.strftime("%Y-%m-%d")
-
-def check_and_record_cost(input_tokens: int, output_tokens: int):
-    global _daily_cost, _cost_reset_day
-    today = time.strftime("%Y-%m-%d")
-    if today != _cost_reset_day:
-        _daily_cost = 0.0
-        _cost_reset_day = today
-    if _daily_cost >= settings.daily_budget_usd:
-        raise HTTPException(503, "Daily budget exhausted. Try tomorrow.")
-    cost = (input_tokens / 1000) * 0.00015 + (output_tokens / 1000) * 0.0006
-    _daily_cost += cost
-
-# ─────────────────────────────────────────────────────────
-# Auth
-# ─────────────────────────────────────────────────────────
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-def verify_api_key(api_key: str = Security(api_key_header)) -> str:
-    if not api_key or api_key != settings.agent_api_key:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or missing API key. Include header: X-API-Key: <key>",
-        )
-    return api_key
-
-# ─────────────────────────────────────────────────────────
 # Lifespan
 # ─────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -108,7 +125,20 @@ async def lifespan(app: FastAPI):
         "version": settings.app_version,
         "environment": settings.environment,
     }))
-    time.sleep(0.1)  # simulate init
+
+    # Init Gemini
+    gemini_ok = init_gemini()
+    if gemini_ok:
+        logger.info(json.dumps({
+            "event": "gemini_ready",
+            "model": settings.llm_model,
+        }))
+    else:
+        logger.warning(json.dumps({
+            "event": "gemini_unavailable",
+            "reason": "missing SDK or API key",
+        }))
+
     _is_ready = True
     logger.info(json.dumps({"event": "ready"}))
 
@@ -145,7 +175,8 @@ async def request_middleware(request: Request, call_next):
         # Security headers
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers.pop("server", None)
+        if "server" in response.headers:
+            del response.headers["server"]
         duration = round((time.time() - start) * 1000, 1)
         logger.info(json.dumps({
             "event": "request",
@@ -182,10 +213,16 @@ def root():
         "app": settings.app_name,
         "version": settings.app_version,
         "environment": settings.environment,
+        "llm": {
+            "provider": "google-gemini",
+            "model": settings.llm_model,
+            "status": "connected" if gemini_client else "not configured",
+        },
         "endpoints": {
             "ask": "POST /ask (requires X-API-Key)",
             "health": "GET /health",
             "ready": "GET /ready",
+            "docs": "GET /docs",
         },
     }
 
@@ -197,27 +234,36 @@ async def ask_agent(
     _key: str = Depends(verify_api_key),
 ):
     """
-    Send a question to the AI agent.
+    Gửi câu hỏi đến AI agent (Gemini).
 
     **Authentication:** Include header `X-API-Key: <your-key>`
     """
     # Rate limit per API key
     check_rate_limit(_key[:8])  # use first 8 chars as key bucket
 
-    # Budget check
+    # Budget check — estimate input tokens
     input_tokens = len(body.question.split()) * 2
     check_and_record_cost(input_tokens, 0)
 
     logger.info(json.dumps({
         "event": "agent_call",
         "q_len": len(body.question),
+        "model": settings.llm_model,
         "client": str(request.client.host) if request.client else "unknown",
     }))
 
-    answer = llm_ask(body.question)
+    # Gọi Gemini API
+    answer = ask_gemini(body.question)
 
+    # Record output cost
     output_tokens = len(answer.split()) * 2
     check_and_record_cost(0, output_tokens)
+
+    logger.info(json.dumps({
+        "event": "agent_response",
+        "answer_len": len(answer),
+        "estimated_tokens": input_tokens + output_tokens,
+    }))
 
     return AskResponse(
         question=body.question,
@@ -231,7 +277,13 @@ async def ask_agent(
 def health():
     """Liveness probe. Platform restarts container if this fails."""
     status = "ok"
-    checks = {"llm": "mock" if not settings.openai_api_key else "openai"}
+    checks = {
+        "llm": {
+            "provider": "gemini",
+            "model": settings.llm_model,
+            "connected": gemini_client is not None,
+        }
+    }
     return {
         "status": status,
         "version": settings.app_version,
@@ -248,19 +300,22 @@ def ready():
     """Readiness probe. Load balancer stops routing here if not ready."""
     if not _is_ready:
         raise HTTPException(503, "Not ready")
-    return {"ready": True}
+    return {"ready": True, "gemini_connected": gemini_client is not None}
 
 
 @app.get("/metrics", tags=["Operations"])
 def metrics(_key: str = Depends(verify_api_key)):
     """Basic metrics (protected)."""
+    daily_cost = get_daily_cost()
+    daily_budget = get_daily_budget()
     return {
         "uptime_seconds": round(time.time() - START_TIME, 1),
         "total_requests": _request_count,
         "error_count": _error_count,
-        "daily_cost_usd": round(_daily_cost, 4),
-        "daily_budget_usd": settings.daily_budget_usd,
-        "budget_used_pct": round(_daily_cost / settings.daily_budget_usd * 100, 1),
+        "daily_cost_usd": round(daily_cost, 4),
+        "daily_budget_usd": daily_budget,
+        "budget_used_pct": round(daily_cost / daily_budget * 100, 1) if daily_budget > 0 else 0,
+        "llm_model": settings.llm_model,
     }
 
 
@@ -276,6 +331,7 @@ signal.signal(signal.SIGTERM, _handle_signal)
 if __name__ == "__main__":
     logger.info(f"Starting {settings.app_name} on {settings.host}:{settings.port}")
     logger.info(f"API Key: {settings.agent_api_key[:4]}****")
+    logger.info(f"LLM: Gemini ({settings.llm_model})")
     uvicorn.run(
         "app.main:app",
         host=settings.host,

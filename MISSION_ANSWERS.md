@@ -376,6 +376,7 @@ LOAD BALANCING IS WORKING - requests distributed across multiple instances!
 ```
 
 **Quan sát:**
+
 - Nginx dùng round-robin phân tán requests qua 3 instances
 - Mỗi instance phục vụ ~3-4 requests trên tổng 10
 - `served_by` field trong response cho thấy instance nào đang xử lý
@@ -437,6 +438,8 @@ Total messages: 10
 
 ### 2. Full Source Code - Lab 06 Complete (60 points)
 
+Deployed: `https://lab12-06-sv-production.up.railway.app/docs`
+
 Your final production-ready agent with all files:
 
 ```
@@ -458,18 +461,19 @@ your-repo/
 ├── railway.toml # Railway config (or render.yaml)
 └── README.md # Setup instructions
 
-````
+```
 
 **Requirements:**
--  All code runs without errors
--  Multi-stage Dockerfile (image < 500 MB)
--  API key authentication
--  Rate limiting (10 req/min)
--  Cost guard ($10/month)
--  Health + readiness checks
--  Graceful shutdown
--  Stateless design (Redis)
--  No hardcoded secrets
+
+- All code runs without errors
+- Multi-stage Dockerfile (image < 500 MB)
+- API key authentication
+- Rate limiting (10 req/min)
+- Cost guard ($10/month)
+- Health + readiness checks
+- Graceful shutdown
+- Stateless design (Redis)
+- No hardcoded secrets
 
 ---
 
@@ -477,21 +481,25 @@ your-repo/
 
 Create a file `DEPLOYMENT.md` with your deployed service information:
 
-```markdown
+````markdown
 # Deployment Information
 
 ## Public URL
+
 https://your-agent.railway.app
 
 ## Platform
+
 Railway / Render / Cloud Run
 
 ## Test Commands
 
 ### Health Check
+
 ```bash
 curl https://your-agent.railway.app/health
 # Expected: {"status": "ok"}
+```
 ````
 
 ### API Test (with authentication)
