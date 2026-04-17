@@ -27,22 +27,25 @@
 
 ### Exercise 2.1: Dockerfile questions
 
-1. Base image: [Your answer]
-2. Working directory: [Your answer]
-   ...
+1. Base image: python:3.11 = full Python distribution (~1 GB)
+2. Working directory: /app
+3. Tại sao COPY requirements.txt trước: để tận dụng Docker layer cache - lần sau cài lại sẽ dùng cache và tiết kiệm thời gian.
+4. CMD vs ENTRYPOINT khác nhau thế nào: CMD là command mặc định khi container start, ENTRYPOINT là command được gọi khi container start. CMD có thể bị ghi đè bởi docker run, còn ENTRYPOINT thì không.
 
 ### Exercise 2.3: Image size comparison
 
-- Develop: [X] MB
-- Production: [Y] MB
-- Difference: [Z]%
+- Stage 1: tạo môi trường để cài dependencies
+- Stage 2: copy dependencies từ stage 1 sang stage 2
+- Develop: 424MB
+- Production: 56.6MB
+- Difference: 86.6%
 
 ## Part 3: Cloud Deployment
 
 ### Exercise 3.1: Railway deployment
 
-- URL: https://your-app.railway.app
-- Screenshot: [Link to screenshot in repo]
+- URL: https://lab12-sv-production.up.railway.app
+- Screenshot: ![Alt text](railway_app_2.png)
 
 ## Part 4: API Security
 
