@@ -8,8 +8,11 @@ Mục tiêu: Tránh bill bất ngờ từ LLM API.
 
 Trong production: lưu trong Redis/DB, không phải in-memory.
 """
+import os
 import time
 import logging
+import redis
+from datetime import datetime
 from dataclasses import dataclass, field
 from fastapi import HTTPException
 
@@ -126,3 +129,42 @@ class CostGuard:
 
 # Singleton
 cost_guard = CostGuard(daily_budget_usd=1.0, global_daily_budget_usd=10.0)
+
+# ──────────────────────────────────────────────────────────
+# Exercise 4.4: Redis-based Cost Guard
+# ──────────────────────────────────────────────────────────
+
+# Kết nối tới Redis (thông tin lấy từ environment variables, mặc định là localhost)
+try:
+    r = redis.Redis(
+        host=os.getenv("REDIS_HOST", "localhost"),
+        port=int(os.getenv("REDIS_PORT", 6379)),
+        db=0,
+        decode_responses=True
+    )
+except Exception:
+    r = None
+
+def check_budget_redis(user_id: str, estimated_cost: float) -> bool:
+    """
+    Exercise 4.4 implementation: Return True nếu còn budget ($10/tháng), False nếu vượt.
+    Track spending trong Redis.
+    """
+    if r is None:
+        logger.error("Redis not connected! Falling back to allow.")
+        return True
+
+    try:
+        month_key = datetime.now().strftime("%Y-%m")
+        key = f"budget:{user_id}:{month_key}"
+
+        current = float(r.get(key) or 0)
+        if current + estimated_cost > 10.0:
+            return False
+
+        r.incrbyfloat(key, estimated_cost)
+        r.expire(key, 32 * 24 * 3600)  # 32 days
+        return True
+    except Exception as e:
+        logger.error(f"Redis error: {e}")
+        return True
