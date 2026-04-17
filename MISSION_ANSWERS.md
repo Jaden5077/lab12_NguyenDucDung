@@ -129,7 +129,54 @@ done
 
 ### Exercise 4.4: Cost guard implementation
 
-[Explain your approach]
+Để giải quyết bài toán quản lý ngân sách (Cost Guard) một cách bền vững trong môi trường production, chúng ta chuyển từ lưu trữ in-memory sang sử dụng **Redis**.
+
+**Lợi ích của Redis:**
+- **Persistence:** Budget không bị mất khi hop/container bị restart.
+- **Shared State:** Nếu chạy nhiều instance của Agent (scaling), tất cả đều check chung một nguồn dữ liệu budget.
+- **Performance:** Thao tác đọc/ghi cực nhanh, không làm chậm API.
+- **TTL (Time To Live):** Tự động reset dữ liệu cũ (ví dụ sau 32 ngày).
+
+**Mô tả logic:**
+1. Tạo một `month_key` dựa trên tháng hiện tại (ví dụ: `2024-04`).
+2. Sử dụng key định dạng `budget:{user_id}:{month_key}` để theo dõi chi tiêu của từng user theo từng tháng.
+3. Trước mỗi request, lấy chi tiêu hiện tại từ Redis.
+4. Nếu chi tiêu hiện tại + chi phí dự kiến > giới hạn ($10), trả về `False` (Blocked).
+5. Nếu còn budget, cập nhật chi tiêu mới vào Redis bằng lệnh `incrbyfloat` (nguyên tử) và đặt thời gian hết hạn (expire) để tránh rác dữ liệu.
+
+**Implementation code:**
+
+```python
+import redis
+from datetime import datetime
+
+# Kết nối tới Redis (thông tin lấy từ environment variables trong thực tế)
+r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
+def check_budget(user_id: str, estimated_cost: float) -> bool:
+    """
+    Kiểm tra xem User còn đủ ngân sách để thực hiện request không.
+    Ngân sách tối đa: $10/tháng.
+    """
+    # 1. Tạo key theo tháng để tự động reset mỗi đầu tháng
+    month_key = datetime.now().strftime("%Y-%m")
+    redis_key = f"budget:{user_id}:{month_key}"
+
+    # 2. Lấy số tiền đã chi tiêu (mặc định là 0 nếu chưa có)
+    current_spent = float(r.get(redis_key) or 0)
+
+    # 3. Kiểm tra nếu vượt quá giới hạn $10
+    if current_spent + estimated_cost > 10.0:
+        return False
+
+    # 4. Cộng dồn chi phí mới
+    r.incrbyfloat(redis_key, estimated_cost)
+
+    # 5. Đặt TTL là 32 ngày (đảm bảo tồn tại qua hết tháng hiện tại)
+    r.expire(redis_key, 32 * 24 * 3600)
+    
+    return True
+```
 
 ## Part 5: Scaling & Reliability
 
