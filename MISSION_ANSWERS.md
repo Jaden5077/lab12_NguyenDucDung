@@ -188,6 +188,26 @@ def check_budget(user_id: str, estimated_cost: float) -> bool:
     return True
 ```
 
+**Kết quả kiểm thử (Verification):**
+
+Để xác thực logic Redis Cost Guard, chúng ta chạy script test (sử dụng môi trường ảo `venv` và Redis container):
+
+```bash
+$ python test_exercise_4_4.py
+SUCCESS: Redis is running.
+Testing budget for test_user_44...
+Step 1 ($2.0): OK
+Step 2 ($7.0): OK (Total spent: 9.0)
+Step 3 ($2.0): FAILED (Expected: FAILED)
+Final recorded spend in Redis: $9.0
+```
+
+**Phân tích:**
+- Request đầu tiên ($2.0) được chấp nhận.
+- Request thứ hai ($7.0) được chấp nhận, tổng chi tiêu lúc này là $9.0 (dưới ngưỡng $10.0).
+- Request thứ ba ($2.0) bị từ chối vì nếu thực hiện, tổng chi tiêu sẽ là $11.0, vượt quá giới hạn tháng.
+- Dữ liệu được lưu trữ bền vững trong Redis và tự động reset sau mỗi tháng nhờ vào `month_key`.
+
 ## Part 5: Scaling & Reliability
 
 ### Exercise 5.1-5.5: Implementation notes
