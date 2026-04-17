@@ -171,20 +171,33 @@ def ready():
 # ──────────────────────────────────────────────────────────
 # GRACEFUL SHUTDOWN
 # ──────────────────────────────────────────────────────────
+import sys
+server: uvicorn.Server | None = None
 
-def handle_sigterm(signum, frame):
+def shutdown_handler(signum, frame):
     """
-    SIGTERM là signal platform gửi khi muốn dừng container.
-    Khác với SIGKILL (không thể catch được).
-
-    uvicorn bắt SIGTERM tự động và gọi lifespan shutdown.
-    Hàm này để log thêm thông tin.
+    Handle SIGTERM/SIGINT từ container orchestrator.
+    
+    Thay vì tắt ngay, ta báo cho uvicorn.Server biết cần shutdown —
+    uvicorn sẽ:
+      1. Stop accepting new connections (đóng listen socket)
+      2. Chờ in-flight requests hoàn thành (tối đa timeout_graceful_shutdown giây)
+      3. Chạy lifespan shutdown (cleanup resources)
+      4. Thoát
     """
-    logger.info(f"Received signal {signum} — uvicorn will handle graceful shutdown")
+    logger.info(f"Received signal {signum} — initiating graceful shutdown")
+    
+    if server is not None:
+        # server.should_exit = True là cách uvicorn-native để trigger graceful shutdown.
+        # KHÔNG dùng os._exit() hay sys.exit() ở đây vì sẽ kill ngay, bỏ qua cleanup.
+        server.should_exit = True
+    else:
+        # Fallback nếu server chưa khởi động xong
+        sys.exit(0)
 
 
-signal.signal(signal.SIGTERM, handle_sigterm)
-signal.signal(signal.SIGINT, handle_sigterm)
+signal.signal(signal.SIGTERM, shutdown_handler)
+signal.signal(signal.SIGINT, shutdown_handler)
 
 
 if __name__ == "__main__":

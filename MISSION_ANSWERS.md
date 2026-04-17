@@ -203,6 +203,7 @@ Final recorded spend in Redis: $9.0
 ```
 
 **Phân tích:**
+
 - Request đầu tiên ($2.0) được chấp nhận.
 - Request thứ hai ($7.0) được chấp nhận, tổng chi tiêu lúc này là $9.0 (dưới ngưỡng $10.0).
 - Request thứ ba ($2.0) bị từ chối vì nếu thực hiện, tổng chi tiêu sẽ là $11.0, vượt quá giới hạn tháng.
@@ -211,6 +212,81 @@ Final recorded spend in Redis: $9.0
 ## Part 5: Scaling & Reliability
 
 ### Exercise 5.1-5.5: Implementation notes
+
+### Exercise 5.1: Health Check Implementation
+
+```bash
+$ curl http://localhost:8000/health -X GET
+{"status":"ok","uptime_seconds":59.3,"version":"1.0.0","environment":"development","timestamp":"2026-04-17T10:31:30.121891+00:00","checks":{"memory":{"status":"ok","note":"psutil not installed"}}}
+```
+
+```bash
+$ curl http://localhost:8000/ready -X GET
+{"ready":true,"in_flight_requests":1}
+
+```
+
+### Exercise 5.2: Readiness Probe Implementation
+
+```python
+import sys
+server: uvicorn.Server | None = None
+
+def shutdown_handler(signum, frame):
+    """
+    Handle SIGTERM/SIGINT từ container orchestrator.
+
+    Thay vì tắt ngay, ta báo cho uvicorn.Server biết cần shutdown —
+    uvicorn sẽ:
+      1. Stop accepting new connections (đóng listen socket)
+      2. Chờ in-flight requests hoàn thành (tối đa timeout_graceful_shutdown giây)
+      3. Chạy lifespan shutdown (cleanup resources)
+      4. Thoát
+    """
+    logger.info(f"Received signal {signum} — initiating graceful shutdown")
+
+    if server is not None:
+        # server.should_exit = True là cách uvicorn-native để trigger graceful shutdown.
+        # KHÔNG dùng os._exit() hay sys.exit() ở đây vì sẽ kill ngay, bỏ qua cleanup.
+        server.should_exit = True
+    else:
+        # Fallback nếu server chưa khởi động xong
+        sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, shutdown_handler)
+signal.signal(signal.SIGINT, shutdown_handler)
+```
+
+```bash
+python app.py &
+PID=$!
+sleep 1
+
+curl "http://localhost:8000/ask?question=Long+task" -X POST &
+sleep 0.5   # request đang chạy, chưa xong (vì mock delay 5s)
+
+kill -TERM $PID
+wait
+
+[1] 4638
+INFO:     Started server process [9000]
+INFO:     Waiting for application startup.
+2026-04-17 20:49:21,568 INFO 🚀 Server đang khởi động...
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+[2] 4656
+2026-04-17 20:49:22,712 INFO 📩 Nhận request: Long task
+2026-04-17 20:49:22,712 INFO ⏳ Đang xử lý tác vụ nặng (5s)...
+curl: (56) Recv failure: Connection was reset
+[1]-  Terminated              python app.py
+[2]+  Exit 56                 curl "http://localhost:8000/ask?question=Long+task" -X POST
+
+```
+
+-> Kết quả là request bị ngắt đột ngột do server bị kill trước khi kịp xử lý xong. Nguyên nhân có khả năng là do xung đột giữa code của chúng ta và cơ chế của uvicorn. Cụ thể, khi chúng ta kill server, uvicorn sẽ cố gắng đóng event loop và các request đang chạy, nhưng code của chúng ta cũng đang cố gắng xử lý request đó, dẫn đến xung đột.
+
+### Exercise 5.3: Stateless design
 
 [Your explanations and test results]
 
